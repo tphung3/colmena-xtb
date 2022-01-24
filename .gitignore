@@ -1,0 +1,16 @@
+dev_deps/
+env.tar.gz
+env.yml
+G13-filtered.csv
+nwchem-atomization-v0
+__pycache__
+python_package_run*
+python_package_run.6UyxvT
+python_package_run.ydFXZ0
+README.md
+redis.out
+runs
+scratch
+wq-pool-213185
+xtb-atomization-v1
+
