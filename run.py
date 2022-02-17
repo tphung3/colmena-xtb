@@ -52,23 +52,23 @@ class Thinker(BaseThinker):
             n_parallel_ml (int): Maximum number of ML calculations to perform in parallel
             queue_length (int): Number of molecules to rank
             sampling_fraction (float): Fraction of search space to explore
-            excess_ml_tasks (int): Number of excess tasks to keep in queue above the 
+            excess_ml_tasks (int): Number of excess tasks to keep in queue above the
                 number necessary to keep the ML workers
         """
         super().__init__(queues, daemon=True)
 
         # Generic stuff: logging, communication to Method Server
         self.output_dir = output_dir
-        
+
         # The ML components
         self.mpnn_paths = mpnn_paths
         self.search_space_path = search_space_path
         self.sampling_fraction = sampling_fraction
-        
+
         # Attributes associated with the parallelism/problem size
         self.n_parallel_qc = n_parallel_qc
         self.molecules_per_ml_task = molecules_per_ml_task
-        
+
         # Compute the number of concurrent ML tasks
         ml_queue_length = n_parallel_ml + excess_ml_tasks
 
@@ -105,9 +105,8 @@ class Thinker(BaseThinker):
     @agent
     def simulation_consumer(self):
         """Submit and process simulation tasks"""
-        
-        return
-      
+
+
         # As they come back submit new ones
         for i in range(self.queue_length):
             # Get the task and store its content
@@ -116,7 +115,7 @@ class Thinker(BaseThinker):
             self.logger.info(f'Retrieved completed QC task {i+1}/{self.queue_length}')
 
             # Store the content from the previous run
-            if result.success:               
+            if result.success:
                 # Save the data
                 self._write_result(result.value[1], 'qcfractal_records.jsonld')
                 if result.value[2] is not None:
@@ -125,23 +124,23 @@ class Thinker(BaseThinker):
             else:
                 self.logger.warning('Calculation failed! See simulation outputs and Parsl log file')
             self._write_result(result, 'simulation_records.jsonld', keep_outputs=True)
-            
-            
+
+
     @agent
     def search_space_reader(self):
-        """Reads search space from disk. 
-        
+        """Reads search space from disk.
+
         Separate thread to keep a queue of molecules ready to submit"""
-        
+
         with open(self.search_space_path) as fp:
             self.logger.info(f'Opened search space molecules from: {self.search_space_path}')
-            
+
             # Compute the number of entries to pull to get desired sampling rate
             if self.sampling_fraction is None or self.sampling_fraction >= 1.0:
                 chunk_size = self.molecules_per_ml_task
             else:
                 chunk_size = int(self.molecules_per_ml_task / self.sampling_fraction)
-            
+
             # Loop until out of molecules
             is_done = False
             while not is_done:
@@ -150,27 +149,27 @@ class Thinker(BaseThinker):
                 is_done = len(chunk) != chunk_size  # Done if we do not reach the desired chunk size
                 if is_done:
                     self.logger.info('Pulled the last batch of molecules')
-                    
+
                 # Downsample the chunk to the desired size
                 if self.sampling_fraction is not None:
                     desired_size = int(len(chunk) * self.sampling_fraction)
                     self.logger.info(f'Downsampling batch from {len(chunk)} to {desired_size}')
-                    chunk = sample(chunk, desired_size)                    
+                    chunk = sample(chunk, desired_size)
 
                 # Parse out the SMILES strings
                 chunk = [line.strip().split(",")[-1] for line in chunk]  # Molecule is the last entry in line
-                
+
                 # Put it in the queue for the task submitter thread
                 self._inference_queue.put(chunk)
-                
+
             # Put a flag in the queue to say we are done
             self._inference_queue.put(None)
 
-            
+
     @agent
     def ml_task_submitter(self):
-        self.n_ml_tasks = 0 
-       
+        self.n_ml_tasks = 0
+
         # Submit all of the ML tasks
         while True:
             # Get a chunk that is ready to submit
@@ -178,8 +177,8 @@ class Thinker(BaseThinker):
             if chunk is None:
                 self.logger.info('No more inference tasks to submit')
                 break
-            
-            # Acquire permission to submit to the queue 
+
+            # Acquire permission to submit to the queue
             #  We do not want too many tasks to be submitted at once to control memory usage
             self._ml_task_pool.acquire()
             self.queues.send_inputs(self.mpnn_paths, chunk, topic='screen', method='evaluate_mpnn', keep_inputs=True,
@@ -187,46 +186,45 @@ class Thinker(BaseThinker):
 
             # Mark that we submitted another batch
             self.n_ml_tasks += 1
-            
+
         # Mark that we are done
         self.logger.info('Submitted all molecules to inference tasks')
         self._ml_tasks_submitted.set()
-    
+
     @agent
     def ml_task_consumer(self):
         # Initial list of molecules and their values
         best_mols = []
         best_energies = []
-        
+
         # Loop until all tasks have been received
         n_received = 0
         while not (self._ml_tasks_submitted.is_set() and n_received == self.n_ml_tasks):
             # Receive a task
             result = self.queues.get_result(topic='screen')
-            
+
             # Mark that it was received and another can be submitted
             self._ml_task_pool.release()
             n_received += 1
             self.logger.info(f'Marked result {n_received}/'
                              f'{self.n_ml_tasks if self._ml_tasks_submitted.is_set() else "?"} as received')
-            
+
             # Save the inference result
             self._write_result(result, 'inference_records.jsonld', keep_outputs=False, keep_inputs=False)
-            
+
             # Find the best molecules
             new_mols = result.args[1]
             new_energies = result.value.mean(axis=1)
-            
+
             total_mols = np.hstack((best_mols, new_mols))
             total_energies = np.hstack((best_energies, new_energies))
-            
+
             best_inds = np.argsort(total_energies)[:self.queue_length]
             best_mols = total_mols[best_inds]
             best_energies = total_energies[best_inds]
             self.logger.info(f'Finished updating list to {len(best_mols)} best molecules')
-            
-        return
-            
+
+
         # We are done ranking all of the molecules, time to submit them!
         for i, (s, e) in enumerate(zip(best_mols, best_energies)):
             # Submit a new QC task (but not more than prescribed amount)
@@ -266,12 +264,12 @@ if __name__ == '__main__':
     # Parse the arguments
     args = parser.parse_args()
     run_params = args.__dict__
-    
+
     # Define the compute setting for the system (only relevant for NWChem)
     #nnodes = int(os.environ.get("COBALT_JOBSIZE", "1"))
     nnodes = 100
     compute_config = {'nnodes': args.qc_parallelism, 'cores_per_rank': 2}
-    
+
     # Determine the number of QC workers and threads per worker
     if args.qc_spec == "xtb":
         qc_workers = nnodes * args.qc_parallelism
@@ -280,7 +278,7 @@ if __name__ == '__main__':
         qc_workers = nnodes // args.qc_parallelism
     run_params["nnodes"] = nnodes
     run_params["qc_workers"] = qc_workers
-    
+
     # Load in the models, initial dataset, agent and search space
     with open(os.path.join(args.mpnn_config_directory, 'atom_types.json')) as fp:
         atom_types = json.load(fp)
@@ -356,16 +354,17 @@ if __name__ == '__main__':
                                      compute_config=compute_config, code=code)
     my_compute_atomization = update_wrapper(my_compute_atomization, compute_atomization_energy)
 
-    my_evaluate_mpnn = partial(evaluate_mpnn, atom_types=atom_types, bond_types=bond_types, 
+    my_evaluate_mpnn = partial(evaluate_mpnn, atom_types=atom_types, bond_types=bond_types,
                                batch_size=512, n_jobs=64)
     my_evaluate_mpnn = update_wrapper(my_evaluate_mpnn, evaluate_mpnn)
 
     # Create the method server and task generator
     ml_cfg = {'executors': ['ml']}
-    dft_cfg = {'executors': ['qc']}
+    #dft_cfg = {'executors': ['qc']}
+    dft_cfg = {'executors': ['ml']}
     doer = ParslMethodServer([(my_evaluate_mpnn, ml_cfg), (my_compute_atomization, dft_cfg)],
                              server_queues, config)
-    
+
     # Compute the number of excess tasks
     excess_tasks = nnodes * args.ml_prefetch + args.ml_excess_queue
 

@@ -7,7 +7,9 @@ conda activate ../../env
 
 # Add NWChem and Psi4 to the path
 export PATH=~/software/psi4/bin:$PATH
-export OMP_NUM_THREADS=64
+#export OMP_NUM_THREADS=64
+#export OMP_NUM_THREADS=8 #change by tphung 2/11/2022, reduce number of cores used
+export OMP_NUM_THREADS=4 #change by tphung 2/17/2022
 export KMP_INIT_AT_FORK=FALSE
 
 export PATH="/lus/theta-fs0/projects/CSC249ADCD08/software/nwchem-6.8.1/bin/LINUX64:$PATH"

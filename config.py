@@ -71,16 +71,17 @@ def theta_xtb_config(log_dir: str, xtb_per_node: int = 1,
         executors=[
             WorkQueueExecutor(
                 	label="ml",
-			project_name="colmena-xtb",
+			project_name="colmena-xtb-v3",
 			port=50055,
 			shared_fs=True,
 			autolabel=True,
 			autocategory=True,
-			provider=LocalProvider(
+		    provider=LocalProvider(
 				init_blocks=0,
 				max_blocks=0    # stop parsl from creating workers for us
 				)
                 	)
+
         ],
         monitoring=MonitoringHub(
             hub_address=address_by_hostname(),

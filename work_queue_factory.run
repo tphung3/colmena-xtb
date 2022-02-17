@@ -1,0 +1,1 @@
+work_queue_factory -T condor -N colmena-xtb-v2 -w 20 -W 50 --workers-per-cycle 10 --tasks-per-worker=1 --cores 16 --memory=32000 --python-package env.tar.gz --debug-file=debug.log
