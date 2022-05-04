@@ -71,7 +71,7 @@ def theta_xtb_config(log_dir: str, xtb_per_node: int = 1,
         executors=[
             WorkQueueExecutor(
                 	label="ml",
-			project_name="colmena-xtb-v3",
+			project_name="colmena-xtb-ty1-old-pol-retried-2",
 			port=50055,
 			shared_fs=True,
 			autolabel=True,

@@ -1,0 +1,1 @@
+result 2 has a bug that tasks might fail in the first 10 tasks, so the total_tasks attribute in qubkcet_qc is not 10 so it keeps allocating default resources to subsequent tasks

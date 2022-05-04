@@ -30,7 +30,251 @@ from colmena.method_server import ParslMethodServer
 from colmena.redis.queue import ClientQueues, make_queue_pairs
 from config import theta_nwchem_config, theta_xtb_config
 
-from qbucket import QTask, QBucket
+class QTask:
+    def __init__(self, consumption, task_id, significance):
+        self.consumption = consumption
+        self.task_id = task_id
+        self.significance = significance
+
+class QBucket:
+    def __init__(self, num_cold_start=10, increase_rate=2, default_res=(1, 1000, 1000), max_res=(12,24000,24000)):
+        self.num_cold_start = num_cold_start #number of cold starts
+        self.increase_rate = increase_rate  #rate of increase from max
+        self.default_res = default_res      #default resources allocation/guess
+        self.max_res = max_res              #max res, like max machine capacity, good if user just say something huge but not ridiculous
+        self.sorted_cores = []              #list of QTasks-cores in order sorted by consumption
+        self.sorted_mem = []                #same as above
+        self.sorted_disk = []               #same as above
+        self.buckets_cores = []             #store current buckets of indices of cores
+        self.buckets_mem = []                #same as above
+        self.buckets_disk = []               #same as above
+        #self.task_sorted_list = []          #list of QTasks in order sorted by consumption
+        self.total_tasks = 0                #number of tasks so far
+        self.force_alloc = 0
+
+    def set_force_alloc(self, flag):
+        self.force_alloc = flag
+
+    def bucket_partitioning(self, low_index, high_index, sorted_res):
+        if low_index == high_index:
+            return [low_index]
+
+        ret_arr = []
+        num_tasks = high_index - low_index + 1
+        sum_cons = 0
+        sum_sig = 0
+        arr_sig = [0]*num_tasks
+        bot_sig = [0]*num_tasks
+        for i in range(low_index, high_index+1):
+            val_sig = sorted_res[i].significance
+            arr_sig[i-low_index] = val_sig
+        bot_arr = [0]*num_tasks
+        for i in range(low_index,high_index+1):
+            sum_cons += sorted_res[i].consumption
+            bot_arr[i-low_index] = sum_cons
+            sum_sig += arr_sig[i-low_index]
+            bot_sig[i-low_index] = sum_sig
+        sum_cons = 0
+        top_arr = [0]*num_tasks
+        for i in range(high_index-1, low_index-1, -1):
+            sum_cons += sorted_res[i+1].consumption
+            top_arr[i-low_index] = sum_cons
+        cost = -1
+        ret_index = -1
+        max_res = sorted_res[high_index].consumption
+        for i in range(low_index, high_index+1):
+            delim_res = sorted_res[i].consumption
+            n1 = i-low_index+1
+            n2 = num_tasks-n1
+            p1 = bot_sig[i-low_index]/bot_sig[high_index-low_index]
+            p2 = 1-p1
+            cost_lower_hit = p1*(p1*(delim_res-bot_arr[i-low_index]/n1))
+            cost_lower_miss = p1*(p2*(max_res-bot_arr[i-low_index]/n1))
+            if n2 == 0:
+                cost_upper_hit = 0
+                cost_upper_miss = 0
+            else:
+                cost_upper_miss = p2*(p1*(delim_res+max_res-top_arr[i-low_index]/n2))
+                cost_upper_hit = p2*(p2*(max_res-top_arr[i-low_index]/n2))
+            delim_cost = cost_lower_hit+cost_lower_miss+cost_upper_miss+cost_upper_hit
+            if cost == -1 or cost > delim_cost:
+                cost = delim_cost
+                ret_index = i
+            else:
+                continue
+        if ret_index == high_index:
+            return [high_index]
+        else:
+            result_low = self.bucket_partitioning(low_index, ret_index, sorted_res)
+            result_high = self.bucket_partitioning(ret_index+1, high_index, sorted_res)
+            for i in range(len(result_low)):
+                if result_low[i] in ret_arr:
+                    continue
+                else:
+                    ret_arr.append(result_low[i])
+            for i in range(len(result_high)):
+                if result_high[i] in ret_arr:
+                    continue
+                else:
+                    ret_arr.append(result_high[i])
+            for i in range(len(ret_arr)-1):
+                if ret_arr[i] < ret_arr[i+1]:
+                    continue
+                else:
+                    print("Problem when partitioning buckets.")
+                    exit(1)
+        return ret_arr
+
+    def get_allocation_resource(self, res_type, last_res, res_exceeded):
+        if res_type == 'core':
+            buckets_res = self.buckets_cores
+            sorted_res = self.sorted_cores
+            max_res = self.max_res[0]
+        elif res_type == 'mem':
+            buckets_res = self.buckets_mem
+            sorted_res = self.sorted_mem
+            max_res = self.max_res[1]
+        else:
+            buckets_res = self.buckets_disk
+            sorted_res = self.sorted_disk
+            max_res = self.max_res[2]
+        if last_res == -1:
+            #this index represents the index in buckets_res
+            base_index = 0
+        #for maxout tasks
+        elif last_res > sorted_res[-1].consumption or (last_res == sorted_res[-1].consumption and res_exceeded):
+            return self.increase_rate*last_res if self.increase_rate*last_res <= max_res else max_res
+        else:
+            #we always have base_index initialized as last_res is bounded from above
+            for i in range(len(buckets_res)):
+                delim_res = buckets_res[i]
+                if res_exceeded:
+                    if last_res >= delim_res:
+                        continue
+                    else:
+                        base_index = i
+                        break
+                else:
+                    if last_res > delim_res:
+                        continue
+                    else:
+                        base_index = i
+                        break
+        num_buckets_resource = len(buckets_res)
+
+        num_completed_tasks = len(self.sorted_cores)
+        weighted_bucket_resource = [0]*num_buckets_resource
+        ptr_weighted_bucket_resource = 0
+        ptr_bucket_resource = 0
+        cnt_resource = 0
+        i = 0
+        while i < num_completed_tasks:
+            resource = sorted_res[i].consumption
+            res_sig = sorted_res[i].significance
+            if resource <= buckets_res[ptr_bucket_resource]:
+                cnt_resource += res_sig
+                if i == num_completed_tasks - 1:
+                    weighted_bucket_resource[ptr_weighted_bucket_resource] = cnt_resource
+                    for j in range(ptr_weighted_bucket_resource+1, num_buckets_resource):
+                        weighted_bucket_resource[j] = res_sig
+                i += 1
+            else:
+                if cnt_resource != 0:
+                    weighted_bucket_resource[ptr_weighted_bucket_resource] = cnt_resource
+                else:
+                    prev_val_sig = sorted_res[i-1].significance
+                    weighted_bucket_resource[ptr_weighted_bucket_resource] = prev_val_sig
+                ptr_weighted_bucket_resource += 1
+                ptr_bucket_resource += 1
+                cnt_resource = 0
+        total_sample_space_resource = sum(weighted_bucket_resource[base_index:])
+
+        random_num = random.random()
+        cumulative_density = 0
+        for i in range(base_index, num_buckets_resource):
+            if i == num_buckets_resource - 1:
+                return buckets_res[i]
+            else:
+                cumulative_density += weighted_bucket_resource[i]/total_sample_space_resource
+                if random_num <= cumulative_density:
+                    return buckets_res[i]
+        return None
+
+    #task_prev_res is (cores, mem, disk) if run fails before by running out of reosurces, otherwise None.
+    #if task_prev_res is None, and task_res_exceeded is also None
+    def get_allocation(self, task_prev_res, task_res_exceeded):
+        total_tasks = len(self.sorted_cores)
+        if task_prev_res is None:
+            if total_tasks < self.num_cold_start and self.force_alloc == 0:
+                return self.default_res  #return default res for new tasks
+            else:
+                task_prev_res = (-1, -1, -1)    #set some parameters here
+                task_res_exceeded = (0, 0, 0)
+        else:
+            pass
+        tcore = task_prev_res[0]
+        tmem = task_prev_res[1]
+        tdisk = task_prev_res[2]
+        max_core = self.max_res[0]  #max machine
+        max_mem = self.max_res[1]
+        max_disk = self.max_res[2]
+        #if no completed tasks or already maxed out in all three resources, double both as appropriate and return
+        if total_tasks == 0 or (tcore >= self.sorted_cores[-1].consumption and tmem >= self.sorted_mem[-1].consumption and tdisk >= self.sorted_disk[-1].consumption):
+            tcore = self.increase_rate * tcore if self.increase_rate * tcore <= max_core else max_core
+            tmem = self.increase_rate * tmem if self.increase_rate * tmem <= max_mem else max_mem
+            tdisk = self.increase_rate * tdisk if self.increase_rate * tdisk <= max_disk else max_disk
+            return (tcore, tmem, tdisk)
+
+        #allocate each resource indepedently
+        tcore = self.get_allocation_resource('core', tcore, task_res_exceeded[0])
+        tmem = self.get_allocation_resource('mem', tmem, task_res_exceeded[1])
+        tdisk = self.get_allocation_resource('disk', tdisk, task_res_exceeded[2])
+        return (tcore, tmem, tdisk)
+
+    def binary_insertion_sort(self, array, element):
+        if len(array) == 0:
+            array.append(element)
+            return array
+        lo = 0
+        hi = len(array) - 1
+        while lo < hi:
+            mid = (lo+hi)//2
+            if array[mid].consumption == element.consumption:
+                array.insert(mid, element)
+                return array
+            elif array[mid].consumption > element.consumption:
+                hi = mid - 1
+            elif array[mid].consumption < element.consumption:
+                lo = mid + 1
+            else:
+                print("Yikes sorting")
+                exit(1)
+
+        if array[lo].consumption > element.consumption:
+            array.insert(lo, element)
+        else:
+            array.insert(lo+1, element)
+        return array
+
+    #task is (cores, mem, disk, task_id, significance), resources are consumption wise
+    #only add when task finishes successfully
+    def add_task(self, task):
+        qcore = QTask(task[0], task[3], task[4])
+        qmem = QTask(task[1], task[3], task[4])
+        qdisk = QTask(task[2], task[3], task[4])
+        self.sorted_cores = self.binary_insertion_sort(self.sorted_cores, qcore)
+        self.sorted_mem = self.binary_insertion_sort(self.sorted_mem, qmem)
+        self.sorted_disk = self.binary_insertion_sort(self.sorted_disk, qdisk)
+
+        #sorted_cores.insert(bisect.bisect_left(sorted_cores, qcore, key=))
+        self.total_tasks += 1
+
+        #partitioning buckets
+        self.buckets_cores = [self.sorted_cores[i].consumption for i in self.bucket_partitioning(0, len(self.sorted_cores) - 1, self.sorted_cores)]
+        self.buckets_mem = [self.sorted_mem[i].consumption for i in self.bucket_partitioning(0, len(self.sorted_mem) - 1, self.sorted_mem)]
+        self.buckets_disk = [self.sorted_disk[i].consumption for i in self.bucket_partitioning(0, len(self.sorted_disk) - 1, self.sorted_disk)]
+        #self.buckets_mem = self.bucket_partitioning(0, len(self.sorted_cores) - 1, self.sorted_mem)
+        #self.buckets_disk = self.bucket_partitioning(0, len(self.sorted_cores) - 1, self.sorted_disk)
 
 #if __name__ == '__main__':
 #    qb = QBucket()

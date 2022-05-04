@@ -7,7 +7,14 @@
 
 # Add NWChem and Psi4 to the path
 #export PATH=~/software/psi4/bin:$PATH
-export OMP_NUM_THREADS=64
+#export OMP_NUM_THREADS=64
+#export OMP_NUM_THREADS=4
+export OMP_NUM_THREADS=2
+export TF_NUM_INTRAOP_THREADS=2
+export TF_NUM_INTEROP_THREADS=2
+
+
+
 export KMP_INIT_AT_FORK=FALSE
 
 mkdir -p scratch  # For the NWChem tasks
@@ -24,7 +31,7 @@ export COMEX_MAX_NB_OUTSTANDING=6
 #export LD_LIBRARY_PATH=/opt/intel/compilers_and_libraries_2018.0.128/linux/compiler/lib/intel64_lin:$LD_LIBRARY_PATH
 
 #- Start the redis-server
-port=199${RANDOM::2}
+port=19${RANDOM::3}
 ./python_package_run -u /dev/shm/colmena -e env.tar.gz \
 redis-server --port $port &> redis.out &
 redis=$!
